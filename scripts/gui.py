@@ -21,6 +21,7 @@ class App(tk.Tk):
 
         self.config_data = load_config()
         self.service_name = "cloudflare-ddns.service"
+        self.timer_name = "cloudflare-ddns.timer" # <-- We will control the timer
         self.log_file_path = os.path.join(PROJECT_ROOT, 'logs', 'ddns.log')
 
         # --- Main Layout ---
@@ -34,7 +35,7 @@ class App(tk.Tk):
         self.start_update_threads()
 
     def create_service_widgets(self, parent):
-        service_frame = ttk.LabelFrame(parent, text="Service Control")
+        service_frame = ttk.LabelFrame(parent, text="Scheduler Control") # Renamed for clarity
         service_frame.pack(fill=tk.X, pady=5)
         
         control_frame = ttk.Frame(service_frame)
@@ -43,9 +44,15 @@ class App(tk.Tk):
         self.status_canvas = tk.Canvas(control_frame, width=20, height=20)
         self.status_canvas.pack(side=tk.LEFT, padx=(0, 10))
         self.status_indicator = self.status_canvas.create_oval(2, 2, 18, 18, fill="red")
+        ttk.Label(control_frame, text="Scheduler Status").pack(side=tk.LEFT, padx=(0, 20))
 
-        ttk.Button(control_frame, text="Start", command=lambda: self.run_systemctl("start")).pack(side=tk.LEFT, padx=5)
-        ttk.Button(control_frame, text="Stop", command=lambda: self.run_systemctl("stop")).pack(side=tk.LEFT, padx=5)
+        # Buttons now control the TIMER
+        ttk.Button(control_frame, text="Start Scheduler", command=lambda: self.run_systemctl("start", self.timer_name)).pack(side=tk.LEFT, padx=5)
+        ttk.Button(control_frame, text="Stop Scheduler", command=lambda: self.run_systemctl("stop", self.timer_name)).pack(side=tk.LEFT, padx=5)
+        
+        # Added a button to manually trigger the SERVICE
+        ttk.Button(control_frame, text="Run Now", command=lambda: self.run_systemctl("start", self.service_name)).pack(side=tk.LEFT, padx=15)
+
 
     def create_notebook_widgets(self, parent):
         notebook = ttk.Notebook(parent)
@@ -113,7 +120,7 @@ class App(tk.Tk):
         ttk.Button(self.subdomain_frame, text="Add Subdomain", command=self.add_subdomain_entry).pack(pady=5)
         
         # --- Save Button ---
-        ttk.Button(parent, text="Save and Restart Service", command=self.save_and_restart).pack(pady=10)
+        ttk.Button(parent, text="Save and Restart Scheduler", command=self.save_and_restart).pack(pady=10)
 
     def add_subdomain_entry(self, name="", proxied=False):
         frame = ttk.Frame(self.subdomain_frame)
@@ -149,21 +156,23 @@ class App(tk.Tk):
         threading.Thread(target=self.update_logs, daemon=True).start()
         threading.Thread(target=self.update_status, daemon=True).start()
 
-    def run_systemctl(self, command):
+    def run_systemctl(self, command, unit_name):
         try:
-            subprocess.run(["systemctl", command, self.service_name], check=True, capture_output=True, text=True)
+            subprocess.run(["systemctl", command, unit_name], check=True, capture_output=True, text=True)
+            messagebox.showinfo("Success", f"Command '{command} {unit_name}' executed successfully.")
         except subprocess.CalledProcessError as e:
             if "permission" in e.stderr.lower() or "authentication" in e.stderr.lower():
                 password = simpledialog.askstring("Sudo Password", "Enter your password:", show='*')
                 if password:
-                    sudo_command = f"echo {password} | sudo -S systemctl {command} {self.service_name}"
-                    subprocess.run(sudo_command, shell=True, check=True, capture_output=True)
+                    sudo_command = f"echo {password} | sudo -S systemctl {command} {unit_name}"
+                    result = subprocess.run(sudo_command, shell=True, check=True, capture_output=True, text=True)
+                    messagebox.showinfo("Success", f"Command '{command} {unit_name}' executed successfully.")
             else:
-                messagebox.showerror("Error", f"Failed to run systemctl {command}: {e.stderr}")
+                messagebox.showerror("Error", f"Failed to run systemctl {command} {unit_name}:\n{e.stderr}")
 
     def save_and_restart(self):
         self.save_config_from_ui()
-        self.run_systemctl("restart")
+        self.run_systemctl("restart", self.timer_name)
 
     def save_config_from_ui(self):
         try:
@@ -191,7 +200,7 @@ class App(tk.Tk):
             }
             save_config(new_config)
             self.config_data = new_config
-            messagebox.showinfo("Success", "Configuration saved successfully.")
+            # No success message here, run_systemctl will show it
         except ValueError:
             messagebox.showerror("Error", "Invalid TTL value. It must be an integer.")
         except Exception as e:
@@ -210,18 +219,19 @@ class App(tk.Tk):
                         self.log_viewer.insert(tk.END, logs)
                         self.log_viewer.see(tk.END)
             except Exception:
-                pass # Avoid showing errors in the log viewer itself
+                pass 
             time.sleep(1)
 
     def update_status(self):
         while True:
             is_active = False
             try:
-                result = subprocess.run(["systemctl", "is-active", self.service_name], capture_output=True, text=True)
+                # Check the status of the TIMER, not the service
+                result = subprocess.run(["systemctl", "is-active", self.timer_name], capture_output=True, text=True)
                 if result.returncode == 0 and result.stdout.strip() == "active":
                     is_active = True
             except Exception:
-                is_active = False # Default to inactive on any error
+                is_active = False
             
             fill_color = "green" if is_active else "red"
             self.status_canvas.itemconfig(self.status_indicator, fill=fill_color)
