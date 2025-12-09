@@ -8,8 +8,6 @@
 
 __version__ = "1.0.2"
 
-from string import Template
-
 import json
 import os
 import signal
@@ -18,10 +16,15 @@ import threading
 import time
 import requests
 import logging
+
+# Add project root to the Python path
+PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
+sys.path.insert(0, PROJECT_ROOT)
+
 from scripts.config import load_config
 
 # Set up logging
-LOG_DIR = os.path.join(os.getcwd(), 'logs')
+LOG_DIR = os.path.join(PROJECT_ROOT, 'logs')
 if not os.path.exists(LOG_DIR):
     os.makedirs(LOG_DIR)
 
@@ -40,10 +43,6 @@ logger.addHandler(file_handler)
 logger.addHandler(console_handler)
 
 
-CONFIG_PATH = os.environ.get('CONFIG_PATH', os.getcwd())
-# Read in all environment variables that have the correct prefix
-ENV_VARS = {key: value for (key, value) in os.environ.items() if key.startswith('CF_DDNS_')}
-
 class GracefulExit:
     def __init__(self):
         self.kill_now = threading.Event()
@@ -56,9 +55,6 @@ class GracefulExit:
 
 
 def deleteEntries(type):
-    # Helper function for deleting A or AAAA records
-    # in the case of no IPv4 or IPv6 connection, yet
-    # existing A or AAAA records are found.
     for option in config["cloudflare"]:
         answer = cf_api(
             "zones/" + option['zone_id'] +
@@ -88,21 +84,14 @@ def getIPs():
             a.pop()
             a = dict(s.split("=") for s in a)["ip"]
         except Exception:
-            global shown_ipv4_warning
-            if not shown_ipv4_warning:
-                shown_ipv4_warning = True
-                logger.warning("🧩 IPv4 not detected via 1.1.1.1, trying 1.0.0.1")
-            # Try secondary IP check
+            logger.warning("🧩 IPv4 not detected via 1.1.1.1, trying 1.0.0.1")
             try:
                 a = requests.get(
                     "https://1.0.0.1/cdn-cgi/trace").text.split("\n")
                 a.pop()
                 a = dict(s.split("=") for s in a)["ip"]
             except Exception:
-                global shown_ipv4_warning_secondary
-                if not shown_ipv4_warning_secondary:
-                    shown_ipv4_warning_secondary = True
-                    logger.warning("🧩 IPv4 not detected via 1.0.0.1. Verify your ISP or DNS provider isn't blocking Cloudflare's IPs.")
+                logger.warning("🧩 IPv4 not detected via 1.0.0.1. Verify your ISP or DNS provider isn't blocking Cloudflare's IPs.")
                 if purgeUnknownRecords:
                     deleteEntries("A")
     if ipv6_enabled:
@@ -112,20 +101,14 @@ def getIPs():
             aaaa.pop()
             aaaa = dict(s.split("=") for s in aaaa)["ip"]
         except Exception:
-            global shown_ipv6_warning
-            if not shown_ipv6_warning:
-                shown_ipv6_warning = True
-                logger.warning("🧩 IPv6 not detected via 1.1.1.1, trying 1.0.0.1")
+            logger.warning("🧩 IPv6 not detected via 1.1.1.1, trying 1.0.0.1")
             try:
                 aaaa = requests.get(
                     "https://[2606:4700:4700::1001]/cdn-cgi/trace").text.split("\n")
                 aaaa.pop()
                 aaaa = dict(s.split("=") for s in aaaa)["ip"]
             except Exception:
-                global shown_ipv6_warning_secondary
-                if not shown_ipv6_warning_secondary:
-                    shown_ipv6_warning_secondary = True
-                    logger.warning("🧩 IPv6 not detected via 1.0.0.1. Verify your ISP or DNS provider isn't blocking Cloudflare's IPs.")
+                logger.warning("🧩 IPv6 not detected via 1.0.0.1. Verify your ISP or DNS provider isn't blocking Cloudflare's IPs.")
                 if purgeUnknownRecords:
                     deleteEntries("AAAA")
     ips = {}
@@ -159,7 +142,6 @@ def commitRecord(ip):
                 name = subdomain
                 proxied = option["proxied"]
             fqdn = base_domain_name
-            # Check if name provided is a reference to the root domain
             if name != '' and name != '@':
                 fqdn = name + "." + base_domain_name
             record = {
@@ -192,64 +174,42 @@ def commitRecord(ip):
             if identifier:
                 if modified:
                     logger.info(f"📡 Updating record: {record['type']} {record['name']} -> {record['content']}")
-                    response = cf_api(
+                    cf_api(
                         "zones/" + option['zone_id'] +
                         "/dns_records/" + identifier,
                         "PUT", option, {}, record)
             else:
                 logger.info(f"➕ Adding new record: {record['type']} {record['name']} -> {record['content']}")
-                response = cf_api(
+                cf_api(
                     "zones/" + option['zone_id'] + "/dns_records", "POST", option, {}, record)
             if purgeUnknownRecords:
                 for id_to_delete in duplicate_ids:
                     id_to_delete = str(id_to_delete)
                     logger.info(f"🗑️ Deleting stale record {id_to_delete}")
-                    response = cf_api(
+                    cf_api(
                         "zones/" + option['zone_id'] +
                         "/dns_records/" + id_to_delete,
                         "DELETE", option)
     return True
 
 
-def updateLoadBalancer(ip):
-
-    for option in config["load_balancer"]:
-        pools = cf_api('user/load_balancers/pools', 'GET', option)
-
-        if pools:
-            idxr = dict((p['id'], i) for i, p in enumerate(pools['result']))
-            idx = idxr.get(option['pool_id'])
-
-            origins = pools['result'][idx]['origins']
-
-            idxr = dict((o['name'], i) for i, o in enumerate(origins))
-            idx = idxr.get(option['origin'])
-
-            origins[idx]['address'] = ip['ip']
-            data = {'origins': origins}
-
-            response = cf_api(f'user/load_balancers/pools/{option["pool_id"]}', 'PATCH', option, {}, data)
-
-
 def cf_api(endpoint, method, config, headers={}, data=False):
-    api_token = config['authentication']['api_token']
-    if api_token != '' and api_token != 'api_token_here':
-        headers = {
-            "Authorization": "Bearer " + api_token, **headers
-        }
-    else:
-        headers = {
-            "X-Auth-Email": config['authentication']['api_key']['account_email'],
-            "X-Auth-Key": config['authentication']['api_key']['api_key'],
-        }
+    auth = config.get('authentication', {})
+    api_token = auth.get('api_token')
+    
+    headers = headers.copy()
+    if api_token and api_token != 'api_token_here':
+        headers["Authorization"] = "Bearer " + api_token
+    elif 'api_key' in auth:
+        headers["X-Auth-Email"] = auth['api_key'].get('account_email')
+        headers["X-Auth-Key"] = auth['api_key'].get('api_key')
+
     try:
-        if (data == False):
-            response = requests.request(
-                method, "https://api.cloudflare.com/client/v4/" + endpoint, headers=headers)
+        url = "https://api.cloudflare.com/client/v4/" + endpoint
+        if data:
+            response = requests.request(method, url, headers=headers, json=data)
         else:
-            response = requests.request(
-                method, "https://api.cloudflare.com/client/v4/" + endpoint,
-                headers=headers, json=data)
+            response = requests.request(method, url, headers=headers)
 
         if response.ok:
             return response.json()
@@ -258,75 +218,44 @@ def cf_api(endpoint, method, config, headers={}, data=False):
             logger.error(response.text)
             return None
     except Exception as e:
-        logger.error(f"😡 An exception occurred while sending '{method}' request to '{endpoint}': {e}")
+        logger.error(f"😡 An exception occurred: {e}")
         return None
 
 
 def updateIPs(ips):
     for ip in ips.values():
         commitRecord(ip)
-        #updateLoadBalancer(ip)
 
 
 if __name__ == '__main__':
-    shown_ipv4_warning = False
-    shown_ipv4_warning_secondary = False
-    shown_ipv6_warning = False
-    shown_ipv6_warning_secondary = False
     ipv4_enabled = True
     ipv6_enabled = True
     purgeUnknownRecords = False
+    ttl = 300
 
     if sys.version_info < (3, 5):
-        raise Exception("🐍 This script requires Python 3.5+")
+        logger.critical("🐍 This script requires Python 3.5+")
+        sys.exit(1)
 
     config = load_config()
     if not config:
-        logger.error("😡 Error reading config.json")
-        # wait 10 seconds to prevent excessive logging on docker auto restart
+        logger.error("😡 Error reading configuration.")
         time.sleep(10)
         sys.exit(1)
 
+    ipv4_enabled = config.get("a", True)
+    ipv6_enabled = config.get("aaaa", True)
+    purgeUnknownRecords = config.get("purgeUnknownRecords", False)
+    ttl = int(config.get("ttl", 300))
 
-    if config is not None:
-        try:
-            ipv4_enabled = config["a"]
-            ipv6_enabled = config["aaaa"]
-        except:
-            ipv4_enabled = True
-            ipv6_enabled = True
-            logger.info("⚙️ Individually disable IPv4 or IPv6 with new config.json options. Read more about it here: https://github.com/timothymiller/cloudflare-ddns/blob/master/README.md")
-        try:
-            purgeUnknownRecords = config["purgeUnknownRecords"]
-        except:
-            purgeUnknownRecords = False
-            logger.info("⚙️ No config detected for 'purgeUnknownRecords' - defaulting to False")
-        try:
-            ttl = int(config["ttl"])
-        except:
-            ttl = 300  # default Cloudflare TTL
-            logger.info(
-                "⚙️ No config detected for 'ttl' - defaulting to 300 seconds (5 minutes)")
-        if ttl < 30:
-            ttl = 1  #
-            logger.info("⚙️ TTL is too low - defaulting to 1 (auto)")
-        if (len(sys.argv) > 1):
-            if (sys.argv[1] == "--repeat"):
-                if ipv4_enabled and ipv6_enabled:
-                    logger.info(
-                        f"🕰️ Updating IPv4 (A) & IPv6 (AAAA) records every {ttl} seconds")
-                elif ipv4_enabled and not ipv6_enabled:
-                    logger.info(f"🕰️ Updating IPv4 (A) records every {ttl} seconds")
-                elif ipv6_enabled and not ipv4_enabled:
-                    logger.info(f"🕰️ Updating IPv6 (AAAA) records every {ttl} seconds")
-                next_time = time.time()
-                killer = GracefulExit()
-                prev_ips = None
-                while True:
-                    updateIPs(getIPs())
-                    if killer.kill_now.wait(ttl):
-                        break
-            else:
-                logger.warning(f"❓ Unrecognized parameter '{sys.argv[1]}'. Stopping now.")
-        else:
+    if ttl < 30:
+        ttl = 1
+        logger.info("⚙️ TTL is too low - defaulting to 1 (auto)")
+
+    if len(sys.argv) > 1 and sys.argv[1] == "--repeat":
+        logger.info(f"🕰️ Updating records every {ttl} seconds (IPv4: {ipv4_enabled}, IPv6: {ipv6_enabled})")
+        killer = GracefulExit()
+        while not killer.kill_now.wait(ttl):
             updateIPs(getIPs())
+    else:
+        updateIPs(getIPs())

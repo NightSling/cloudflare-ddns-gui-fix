@@ -1,10 +1,16 @@
 import tkinter as tk
 from tkinter import ttk, scrolledtext, messagebox, simpledialog
 import os
+import sys
 import json
 import threading
 import time
 import subprocess
+
+# Add project root to the Python path
+PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
+sys.path.insert(0, PROJECT_ROOT)
+
 from scripts.config import load_config, save_config
 
 class App(tk.Tk):
@@ -15,18 +21,23 @@ class App(tk.Tk):
 
         self.config_data = load_config()
         self.service_name = "cloudflare-ddns.service"
+        self.log_file_path = os.path.join(PROJECT_ROOT, 'logs', 'ddns.log')
 
+        # Main container
         main_container = ttk.Frame(self)
         main_container.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
 
+        # Service control section
         service_frame = ttk.LabelFrame(main_container, text="Service Control")
         service_frame.pack(fill=tk.X, pady=5)
         self.create_service_widgets(service_frame)
 
+        # Configuration section
         config_frame = ttk.LabelFrame(main_container, text="Configuration")
         config_frame.pack(fill=tk.X, pady=5)
         self.create_config_widgets(config_frame)
 
+        # Log viewer section
         log_frame = ttk.LabelFrame(main_container, text="Logs")
         log_frame.pack(fill=tk.BOTH, expand=True, pady=5)
 
@@ -63,6 +74,7 @@ class App(tk.Tk):
 
     def run_systemctl(self, command):
         try:
+            # First, try without sudo
             subprocess.run(["systemctl", command, self.service_name], check=True, capture_output=True)
         except subprocess.CalledProcessError as e:
             if "permission" in e.stderr.decode().lower() or "authentication" in e.stderr.decode().lower():
@@ -92,13 +104,14 @@ class App(tk.Tk):
             messagebox.showerror("Error", f"Failed to save configuration: {e}")
 
     def update_logs(self):
-        log_file = os.path.join(os.getcwd(), '..', 'logs', 'ddns.log')
-        if not os.path.exists(log_file):
-           with open(log_file, 'w') as f:
+        if not os.path.exists(self.log_file_path):
+            # Create the file if it doesn't exist to avoid errors
+            os.makedirs(os.path.dirname(self.log_file_path), exist_ok=True)
+            with open(self.log_file_path, 'w') as f:
                 pass
         while True:
             try:
-                with open(log_file, 'r') as f:
+                with open(self.log_file_path, 'r') as f:
                     logs = f.read()
                     if self.log_viewer.get("1.0", tk.END).strip() != logs.strip():
                         self.log_viewer.delete("1.0", tk.END)
@@ -112,6 +125,7 @@ class App(tk.Tk):
     def update_status(self):
         while True:
             try:
+                # Try without sudo first
                 result = subprocess.run(["systemctl", "is-active", self.service_name], capture_output=True, text=True)
                 is_active = result.stdout.strip() == "active"
 
@@ -132,14 +146,6 @@ class App(tk.Tk):
 
 
 if __name__ == "__main__":
-    if os.geteuid() != 0:
-        password = simpledialog.askstring("Sudo Password", "Enter your password to run the application:", show='*')
-        if password:
-            command = f"echo {password} | sudo -S python3 " + " ".join(sys.argv)
-            os.system(command)
-            sys.exit()
-        else:
-            sys.exit("Sudo password required.")
-
+    # No need to re-run with sudo, ask for password when needed.
     app = App()
     app.mainloop()
