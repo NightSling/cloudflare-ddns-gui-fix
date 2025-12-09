@@ -32,18 +32,22 @@ class App(tk.Tk):
         service_frame.pack(fill=tk.X, pady=5)
         self.create_service_widgets(service_frame)
 
-        # Configuration section
-        config_frame = ttk.LabelFrame(main_container, text="Configuration")
-        config_frame.pack(fill=tk.X, pady=5)
-        self.create_config_widgets(config_frame)
+        # Notebook for tabs
+        self.notebook = ttk.Notebook(main_container)
+        self.notebook.pack(fill=tk.BOTH, expand=True, pady=5)
 
-        # Log viewer section
-        log_frame = ttk.LabelFrame(main_container, text="Logs")
-        log_frame.pack(fill=tk.BOTH, expand=True, pady=5)
+        # Configuration Tab
+        config_tab = ttk.Frame(self.notebook)
+        self.notebook.add(config_tab, text="Configuration")
+        self.create_config_widgets(config_tab)
 
-        self.log_viewer = scrolledtext.ScrolledText(log_frame, wrap=tk.WORD)
+        # Logs Tab
+        logs_tab = ttk.Frame(self.notebook)
+        self.notebook.add(logs_tab, text="Logs")
+        self.log_viewer = scrolledtext.ScrolledText(logs_tab, wrap=tk.WORD)
         self.log_viewer.pack(fill=tk.BOTH, expand=True)
 
+        # Threads for updates
         self.log_thread = threading.Thread(target=self.update_logs, daemon=True)
         self.log_thread.start()
 
@@ -65,16 +69,68 @@ class App(tk.Tk):
         self.stop_button.pack(side=tk.LEFT, padx=5)
 
     def create_config_widgets(self, parent):
-        self.config_text = tk.Text(parent, height=15)
-        self.config_text.pack(fill=tk.X, padx=5, pady=5)
-        self.config_text.insert(tk.END, json.dumps(self.config_data, indent=4))
+        # --- General Settings ---
+        general_frame = ttk.LabelFrame(parent, text="General")
+        general_frame.pack(fill=tk.X, padx=5, pady=5)
 
+        self.a_var = tk.BooleanVar(value=self.config_data.get("a", True))
+        ttk.Checkbutton(general_frame, text="Enable IPv4 (A records)", variable=self.a_var).pack(anchor=tk.W)
+
+        self.aaaa_var = tk.BooleanVar(value=self.config_data.get("aaaa", True))
+        ttk.Checkbutton(general_frame, text="Enable IPv6 (AAAA records)", variable=self.aaaa_var).pack(anchor=tk.W)
+        
+        self.purge_var = tk.BooleanVar(value=self.config_data.get("purgeUnknownRecords", False))
+        ttk.Checkbutton(general_frame, text="Purge Unknown Records", variable=self.purge_var).pack(anchor=tk.W)
+
+        ttk.Label(general_frame, text="TTL (in seconds):").pack(anchor=tk.W, side=tk.LEFT)
+        self.ttl_var = tk.StringVar(value=self.config_data.get("ttl", 300))
+        ttk.Entry(general_frame, textvariable=self.ttl_var).pack(anchor=tk.W, side=tk.LEFT)
+
+        # --- Cloudflare Settings (simplified for now) ---
+        cf_frame = ttk.LabelFrame(parent, text="Cloudflare")
+        cf_frame.pack(fill=tk.X, padx=5, pady=5, expand=True)
+        
+        # For simplicity, we'll handle the first Cloudflare config entry
+        cf_config = self.config_data.get("cloudflare", [{}])[0]
+        auth = cf_config.get("authentication", {})
+        api_key_info = auth.get("api_key", {})
+
+        ttk.Label(cf_frame, text="API Token:").pack(anchor=tk.W)
+        self.api_token_var = tk.StringVar(value=auth.get("api_token", ""))
+        ttk.Entry(cf_frame, textvariable=self.api_token_var, width=50).pack(fill=tk.X)
+
+        ttk.Label(cf_frame, text="API Key:").pack(anchor=tk.W)
+        self.api_key_var = tk.StringVar(value=api_key_info.get("api_key", ""))
+        ttk.Entry(cf_frame, textvariable=self.api_key_var, width=50).pack(fill=tk.X)
+
+        ttk.Label(cf_frame, text="Account Email:").pack(anchor=tk.W)
+        self.email_var = tk.StringVar(value=api_key_info.get("account_email", ""))
+        ttk.Entry(cf_frame, textvariable=self.email_var, width=50).pack(fill=tk.X)
+
+        ttk.Label(cf_frame, text="Zone ID:").pack(anchor=tk.W)
+        self.zone_id_var = tk.StringVar(value=cf_config.get("zone_id", ""))
+        ttk.Entry(cf_frame, textvariable=self.zone_id_var, width=50).pack(fill=tk.X)
+
+        # --- Subdomains (very simplified) ---
+        subdomain_frame = ttk.LabelFrame(cf_frame, text="Subdomains")
+        subdomain_frame.pack(fill=tk.X, padx=5, pady=5, expand=True)
+        self.subdomain_entries = []
+        for sub in cf_config.get("subdomains", []):
+            frame = ttk.Frame(subdomain_frame)
+            frame.pack(fill=tk.X)
+            name_var = tk.StringVar(value=sub.get("name", ""))
+            proxied_var = tk.BooleanVar(value=sub.get("proxied", False))
+            ttk.Label(frame, text="Name:").pack(side=tk.LEFT)
+            ttk.Entry(frame, textvariable=name_var).pack(side=tk.LEFT, expand=True, fill=tk.X)
+            ttk.Checkbutton(frame, text="Proxied", variable=proxied_var).pack(side=tk.LEFT)
+            self.subdomain_entries.append((name_var, proxied_var))
+
+        # --- Save Button ---
         save_button = ttk.Button(parent, text="Save and Restart Service", command=self.save_and_restart)
-        save_button.pack(pady=5)
+        save_button.pack(pady=10)
 
     def run_systemctl(self, command):
         try:
-            # First, try without sudo
             subprocess.run(["systemctl", command, self.service_name], check=True, capture_output=True)
         except subprocess.CalledProcessError as e:
             if "permission" in e.stderr.decode().lower() or "authentication" in e.stderr.decode().lower():
@@ -85,30 +141,47 @@ class App(tk.Tk):
             else:
                 messagebox.showerror("Error", f"Failed to run systemctl {command}: {e.stderr.decode()}")
 
-
     def save_and_restart(self):
-        self.save_config_ui()
+        self.save_config_from_ui()
         self.run_systemctl("restart")
 
-
-    def save_config_ui(self):
+    def save_config_from_ui(self):
         try:
-            new_config_str = self.config_text.get("1.0", tk.END)
-            new_config = json.loads(new_config_str)
+            # Reconstruct the config data from UI elements
+            new_config = {
+                "a": self.a_var.get(),
+                "aaaa": self.aaaa_var.get(),
+                "purgeUnknownRecords": self.purge_var.get(),
+                "ttl": int(self.ttl_var.get()),
+                "cloudflare": [
+                    {
+                        "authentication": {
+                            "api_token": self.api_token_var.get(),
+                            "api_key": {
+                                "api_key": self.api_key_var.get(),
+                                "account_email": self.email_var.get()
+                            }
+                        },
+                        "zone_id": self.zone_id_var.get(),
+                        "subdomains": [
+                            {"name": name_var.get(), "proxied": proxied_var.get()}
+                            for name_var, proxied_var in self.subdomain_entries
+                        ]
+                    }
+                ]
+            }
             save_config(new_config)
             self.config_data = new_config
             messagebox.showinfo("Success", "Configuration saved successfully.")
-        except json.JSONDecodeError:
-            messagebox.showerror("Error", "Invalid JSON format.")
+        except ValueError:
+            messagebox.showerror("Error", "Invalid TTL value. It must be an integer.")
         except Exception as e:
             messagebox.showerror("Error", f"Failed to save configuration: {e}")
 
     def update_logs(self):
         if not os.path.exists(self.log_file_path):
-            # Create the file if it doesn't exist to avoid errors
             os.makedirs(os.path.dirname(self.log_file_path), exist_ok=True)
-            with open(self.log_file_path, 'w') as f:
-                pass
+            with open(self.log_file_path, 'w') as f: pass
         while True:
             try:
                 with open(self.log_file_path, 'r') as f:
@@ -125,27 +198,21 @@ class App(tk.Tk):
     def update_status(self):
         while True:
             try:
-                # Try without sudo first
                 result = subprocess.run(["systemctl", "is-active", self.service_name], capture_output=True, text=True)
                 is_active = result.stdout.strip() == "active"
-
-                if "failed" in result.stdout.strip().lower(): # Could be permission denied
+                if "failed" in result.stdout.strip().lower():
                      password = simpledialog.askstring("Sudo Password", "Enter your password:", show='*')
                      if password:
                         sudo_command = f"echo {password} | sudo -S systemctl is-active {self.service_name}"
                         result = subprocess.run(sudo_command, shell=True, capture_output=True, text=True)
                         is_active = result.stdout.strip() == "active"
-
-                if is_active:
-                    self.status_canvas.itemconfig(self.status_indicator, fill="green")
-                else:
-                    self.status_canvas.itemconfig(self.status_indicator, fill="red")
+                
+                fill_color = "green" if is_active else "red"
+                self.status_canvas.itemconfig(self.status_indicator, fill=fill_color)
             except Exception:
                 self.status_canvas.itemconfig(self.status_indicator, fill="red")
             time.sleep(5)
 
-
 if __name__ == "__main__":
-    # No need to re-run with sudo, ask for password when needed.
     app = App()
     app.mainloop()
