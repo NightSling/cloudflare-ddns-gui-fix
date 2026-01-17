@@ -18,18 +18,20 @@ import requests
 import logging
 
 # Add project root to the Python path
-PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
+PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 sys.path.insert(0, PROJECT_ROOT)
 
 from scripts.config import load_config
 
-# Set up logging
-LOG_DIR = os.path.join(PROJECT_ROOT, 'logs')
+# Set up logging and paths
+PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__)))
+MANAGED_RECORDS_FILE = os.path.join(PROJECT_ROOT, "managed_records.json")
+LOG_DIR = os.path.join(PROJECT_ROOT, "logs")
 if not os.path.exists(LOG_DIR):
     os.makedirs(LOG_DIR)
 
-log_formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s')
-log_file = os.path.join(LOG_DIR, 'ddns.log')
+log_formatter = logging.Formatter("%(asctime)s - %(levelname)s - %(message)s")
+log_file = os.path.join(LOG_DIR, "ddns.log")
 
 file_handler = logging.FileHandler(log_file)
 file_handler.setFormatter(log_formatter)
@@ -54,20 +56,122 @@ class GracefulExit:
         self.kill_now.set()
 
 
+def load_managed_records():
+    if os.path.exists(MANAGED_RECORDS_FILE):
+        try:
+            with open(MANAGED_RECORDS_FILE, "r") as f:
+                return json.load(f)
+        except (json.JSONDecodeError, IOError):
+            return []
+    return []
+
+
+def save_managed_records(records):
+    with open(MANAGED_RECORDS_FILE, "w") as f:
+        json.dump(records, f, indent=2)
+
+
+def get_config_record_keys(cfg):
+    keys = set()
+    for option in cfg.get("cloudflare", []):
+        zone_id = option.get("zone_id")
+        if not zone_id:
+            continue
+        response = cf_api("zones/" + zone_id, "GET", option)
+        if response is None or response.get("result", {}).get("name") is None:
+            continue
+        base_domain_name = response["result"]["name"]
+        subdomains = option.get("subdomains", [])
+        for subdomain in subdomains:
+            try:
+                name = subdomain["name"].lower().strip()
+            except:
+                name = str(subdomain).lower().strip()
+            fqdn = base_domain_name
+            if name != "" and name != "@":
+                fqdn = name + "." + base_domain_name
+            if cfg.get("a", True):
+                keys.add(f"{zone_id}|{fqdn}|A")
+            if cfg.get("aaaa", True):
+                keys.add(f"{zone_id}|{fqdn}|AAAA")
+    return keys
+
+
+def find_orphaned_records(managed_records, config_keys):
+    orphaned = []
+    for record in managed_records:
+        key = f"{record['zone_id']}|{record['fqdn']}|{record['type']}"
+        if key not in config_keys:
+            orphaned.append(record)
+    return orphaned
+
+
+def delete_orphaned_records(orphaned_records, cfg):
+    if not orphaned_records:
+        return
+    zone_configs = {opt["zone_id"]: opt for opt in cfg.get("cloudflare", [])}
+    for record in orphaned_records:
+        zone_id = record["zone_id"]
+        record_id = record.get("record_id")
+        fqdn = record["fqdn"]
+        record_type = record["type"]
+        option = zone_configs.get(zone_id)
+        if not option:
+            logger.warning(
+                f"⚠️ Cannot delete orphaned record {fqdn} ({record_type}): zone {zone_id} not in config"
+            )
+            continue
+        if record_id:
+            result = cf_api(
+                f"zones/{zone_id}/dns_records/{record_id}", "DELETE", option
+            )
+            if result is not None:
+                logger.info(
+                    f"🗑️ Deleted orphaned record: {record_type} {fqdn} (removed from config)"
+                )
+            else:
+                logger.warning(
+                    f"⚠️ Failed to delete orphaned record: {record_type} {fqdn}"
+                )
+        else:
+            dns_records = cf_api(
+                f"zones/{zone_id}/dns_records?per_page=100&type={record_type}&name={fqdn}",
+                "GET",
+                option,
+            )
+            if dns_records and dns_records.get("result"):
+                for r in dns_records["result"]:
+                    if r["name"] == fqdn:
+                        result = cf_api(
+                            f"zones/{zone_id}/dns_records/{r['id']}", "DELETE", option
+                        )
+                        if result is not None:
+                            logger.info(
+                                f"🗑️ Deleted orphaned record: {record_type} {fqdn} (removed from config)"
+                            )
+                        else:
+                            logger.warning(
+                                f"⚠️ Failed to delete orphaned record: {record_type} {fqdn}"
+                            )
+
+
 def deleteEntries(type):
     for option in config["cloudflare"]:
         answer = cf_api(
-            "zones/" + option['zone_id'] +
-            "/dns_records?per_page=100&type=" + type,
-            "GET", option)
+            "zones/" + option["zone_id"] + "/dns_records?per_page=100&type=" + type,
+            "GET",
+            option,
+        )
         if answer is None or answer["result"] is None:
             time.sleep(5)
             return
         for record in answer["result"]:
             identifier = str(record["id"])
             cf_api(
-                "zones/" + option['zone_id'] + "/dns_records/" + identifier,
-                "DELETE", option)
+                "zones/" + option["zone_id"] + "/dns_records/" + identifier,
+                "DELETE",
+                option,
+            )
             logger.info(f"🗑️ Deleted stale record {identifier}")
 
 
@@ -79,61 +183,61 @@ def getIPs():
     global purgeUnknownRecords
     if ipv4_enabled:
         try:
-            a = requests.get(
-                "https://1.1.1.1/cdn-cgi/trace").text.split("\n")
+            a = requests.get("https://1.1.1.1/cdn-cgi/trace").text.split("\n")
             a.pop()
             a = dict(s.split("=") for s in a)["ip"]
         except Exception:
             logger.warning("🧩 IPv4 not detected via 1.1.1.1, trying 1.0.0.1")
             try:
-                a = requests.get(
-                    "https://1.0.0.1/cdn-cgi/trace").text.split("\n")
+                a = requests.get("https://1.0.0.1/cdn-cgi/trace").text.split("\n")
                 a.pop()
                 a = dict(s.split("=") for s in a)["ip"]
             except Exception:
-                logger.warning("🧩 IPv4 not detected via 1.0.0.1. Verify your ISP or DNS provider isn't blocking Cloudflare's IPs.")
+                logger.warning(
+                    "🧩 IPv4 not detected via 1.0.0.1. Verify your ISP or DNS provider isn't blocking Cloudflare's IPs."
+                )
                 if purgeUnknownRecords:
                     deleteEntries("A")
     if ipv6_enabled:
         try:
             aaaa = requests.get(
-                "https://[2606:4700:4700::1111]/cdn-cgi/trace").text.split("\n")
+                "https://[2606:4700:4700::1111]/cdn-cgi/trace"
+            ).text.split("\n")
             aaaa.pop()
             aaaa = dict(s.split("=") for s in aaaa)["ip"]
         except Exception:
             logger.warning("🧩 IPv6 not detected via 1.1.1.1, trying 1.0.0.1")
             try:
                 aaaa = requests.get(
-                    "https://[2606:4700:4700::1001]/cdn-cgi/trace").text.split("\n")
+                    "https://[2606:4700:4700::1001]/cdn-cgi/trace"
+                ).text.split("\n")
                 aaaa.pop()
                 aaaa = dict(s.split("=") for s in aaaa)["ip"]
             except Exception:
-                logger.warning("🧩 IPv6 not detected via 1.0.0.1. Verify your ISP or DNS provider isn't blocking Cloudflare's IPs.")
+                logger.warning(
+                    "🧩 IPv6 not detected via 1.0.0.1. Verify your ISP or DNS provider isn't blocking Cloudflare's IPs."
+                )
                 if purgeUnknownRecords:
                     deleteEntries("AAAA")
     ips = {}
-    if (a is not None):
-        ips["ipv4"] = {
-            "type": "A",
-            "ip": a
-        }
-    if (aaaa is not None):
-        ips["ipv6"] = {
-            "type": "AAAA",
-            "ip": aaaa
-        }
+    if a is not None:
+        ips["ipv4"] = {"type": "A", "ip": a}
+    if aaaa is not None:
+        ips["ipv6"] = {"type": "AAAA", "ip": aaaa}
     return ips
 
 
 def commitRecord(ip):
     global ttl
+    managed = []
     for option in config["cloudflare"]:
         subdomains = option["subdomains"]
-        response = cf_api("zones/" + option['zone_id'], "GET", option)
+        response = cf_api("zones/" + option["zone_id"], "GET", option)
         if response is None or response["result"]["name"] is None:
             time.sleep(5)
-            return
+            return managed
         base_domain_name = response["result"]["name"]
+        zone_id = option["zone_id"]
         for subdomain in subdomains:
             try:
                 name = subdomain["name"].lower().strip()
@@ -142,25 +246,29 @@ def commitRecord(ip):
                 name = subdomain
                 proxied = option["proxied"]
             fqdn = base_domain_name
-            if name != '' and name != '@':
+            if name != "" and name != "@":
                 fqdn = name + "." + base_domain_name
             record = {
                 "type": ip["type"],
                 "name": fqdn,
                 "content": ip["ip"],
                 "proxied": proxied,
-                "ttl": ttl
+                "ttl": ttl,
             }
             dns_records = cf_api(
-                "zones/" + option['zone_id'] +
-                "/dns_records?per_page=100&type=" + ip["type"],
-                "GET", option)
+                "zones/"
+                + option["zone_id"]
+                + "/dns_records?per_page=100&type="
+                + ip["type"],
+                "GET",
+                option,
+            )
             identifier = None
             modified = False
             duplicate_ids = []
             if dns_records is not None:
                 for r in dns_records["result"]:
-                    if (r["name"] == fqdn):
+                    if r["name"] == fqdn:
                         if identifier:
                             if r["content"] == ip["ip"]:
                                 duplicate_ids.append(identifier)
@@ -169,40 +277,75 @@ def commitRecord(ip):
                                 duplicate_ids.append(r["id"])
                         else:
                             identifier = r["id"]
-                            if r['content'] != record['content'] or r['proxied'] != record['proxied']:
+                            if (
+                                r["content"] != record["content"]
+                                or r["proxied"] != record["proxied"]
+                            ):
                                 modified = True
             if identifier:
                 if modified:
-                    logger.info(f"📡 Updating record: {record['type']} {record['name']} -> {record['content']}")
+                    logger.info(
+                        f"📡 Updating record: {record['type']} {record['name']} -> {record['content']}"
+                    )
                     cf_api(
-                        "zones/" + option['zone_id'] +
-                        "/dns_records/" + identifier,
-                        "PUT", option, {}, record)
+                        "zones/" + option["zone_id"] + "/dns_records/" + identifier,
+                        "PUT",
+                        option,
+                        {},
+                        record,
+                    )
+                managed.append(
+                    {
+                        "zone_id": zone_id,
+                        "fqdn": fqdn,
+                        "type": ip["type"],
+                        "record_id": identifier,
+                    }
+                )
             else:
-                logger.info(f"➕ Adding new record: {record['type']} {record['name']} -> {record['content']}")
-                cf_api(
-                    "zones/" + option['zone_id'] + "/dns_records", "POST", option, {}, record)
+                logger.info(
+                    f"➕ Adding new record: {record['type']} {record['name']} -> {record['content']}"
+                )
+                create_result = cf_api(
+                    "zones/" + option["zone_id"] + "/dns_records",
+                    "POST",
+                    option,
+                    {},
+                    record,
+                )
+                new_record_id = None
+                if create_result and create_result.get("result"):
+                    new_record_id = create_result["result"].get("id")
+                managed.append(
+                    {
+                        "zone_id": zone_id,
+                        "fqdn": fqdn,
+                        "type": ip["type"],
+                        "record_id": new_record_id,
+                    }
+                )
             if purgeUnknownRecords:
                 for id_to_delete in duplicate_ids:
                     id_to_delete = str(id_to_delete)
                     logger.info(f"🗑️ Deleting stale record {id_to_delete}")
                     cf_api(
-                        "zones/" + option['zone_id'] +
-                        "/dns_records/" + id_to_delete,
-                        "DELETE", option)
-    return True
+                        "zones/" + option["zone_id"] + "/dns_records/" + id_to_delete,
+                        "DELETE",
+                        option,
+                    )
+    return managed
 
 
 def cf_api(endpoint, method, config, headers={}, data=False):
-    auth = config.get('authentication', {})
-    api_token = auth.get('api_token')
-    
+    auth = config.get("authentication", {})
+    api_token = auth.get("api_token")
+
     headers = headers.copy()
-    if api_token and api_token != 'api_token_here':
+    if api_token and api_token != "api_token_here":
         headers["Authorization"] = "Bearer " + api_token
-    elif 'api_key' in auth:
-        headers["X-Auth-Email"] = auth['api_key'].get('account_email')
-        headers["X-Auth-Key"] = auth['api_key'].get('api_key')
+    elif "api_key" in auth:
+        headers["X-Auth-Email"] = auth["api_key"].get("account_email")
+        headers["X-Auth-Key"] = auth["api_key"].get("api_key")
 
     try:
         url = "https://api.cloudflare.com/client/v4/" + endpoint
@@ -223,11 +366,26 @@ def cf_api(endpoint, method, config, headers={}, data=False):
 
 
 def updateIPs(ips):
+    all_managed = []
     for ip in ips.values():
-        commitRecord(ip)
+        managed = commitRecord(ip)
+        all_managed.extend(managed)
+    save_managed_records(all_managed)
+    return all_managed
 
 
-if __name__ == '__main__':
+def cleanup_orphaned_records(cfg):
+    managed_records = load_managed_records()
+    if not managed_records:
+        return
+    config_keys = get_config_record_keys(cfg)
+    orphaned = find_orphaned_records(managed_records, config_keys)
+    if orphaned:
+        logger.info(f"🔍 Found {len(orphaned)} orphaned record(s) to delete")
+        delete_orphaned_records(orphaned, cfg)
+
+
+if __name__ == "__main__":
     ipv4_enabled = True
     ipv6_enabled = True
     purgeUnknownRecords = False
@@ -253,9 +411,13 @@ if __name__ == '__main__':
         logger.info("⚙️ TTL is too low - defaulting to 1 (auto)")
 
     if len(sys.argv) > 1 and sys.argv[1] == "--repeat":
-        logger.info(f"🕰️ Updating records every {ttl} seconds (IPv4: {ipv4_enabled}, IPv6: {ipv6_enabled})")
+        logger.info(
+            f"🕰️ Updating records every {ttl} seconds (IPv4: {ipv4_enabled}, IPv6: {ipv6_enabled})"
+        )
         killer = GracefulExit()
         while not killer.kill_now.wait(ttl):
+            cleanup_orphaned_records(config)
             updateIPs(getIPs())
     else:
+        cleanup_orphaned_records(config)
         updateIPs(getIPs())
