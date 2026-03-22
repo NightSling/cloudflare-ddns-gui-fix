@@ -183,39 +183,27 @@ def getIPs():
     global purgeUnknownRecords
     if ipv4_enabled:
         try:
-            a = requests.get("https://1.1.1.1/cdn-cgi/trace").text.split("\n")
-            a.pop()
-            a = dict(s.split("=") for s in a)["ip"]
+            a = requests.get("https://api.ipify.org").text.strip()
         except Exception:
-            logger.warning("🧩 IPv4 not detected via 1.1.1.1, trying 1.0.0.1")
+            logger.warning("🧩 IPv4 not detected via ipify, trying ifconfig.me")
             try:
-                a = requests.get("https://1.0.0.1/cdn-cgi/trace").text.split("\n")
-                a.pop()
-                a = dict(s.split("=") for s in a)["ip"]
+                a = requests.get("https://ifconfig.me/ip").text.strip()
             except Exception:
                 logger.warning(
-                    "🧩 IPv4 not detected via 1.0.0.1. Verify your ISP or DNS provider isn't blocking Cloudflare's IPs."
+                    "🧩 IPv4 not detected via ifconfig.me. Verify your internet connection."
                 )
                 if purgeUnknownRecords:
                     deleteEntries("A")
     if ipv6_enabled:
         try:
-            aaaa = requests.get(
-                "https://[2606:4700:4700::1111]/cdn-cgi/trace"
-            ).text.split("\n")
-            aaaa.pop()
-            aaaa = dict(s.split("=") for s in aaaa)["ip"]
+            aaaa = requests.get("https://api64.ipify.org").text.strip()
         except Exception:
-            logger.warning("🧩 IPv6 not detected via 1.1.1.1, trying 1.0.0.1")
+            logger.warning("🧩 IPv6 not detected via ipify, trying ifconfig.me")
             try:
-                aaaa = requests.get(
-                    "https://[2606:4700:4700::1001]/cdn-cgi/trace"
-                ).text.split("\n")
-                aaaa.pop()
-                aaaa = dict(s.split("=") for s in aaaa)["ip"]
+                aaaa = requests.get("https://ifconfig.me/ip").text.strip()
             except Exception:
                 logger.warning(
-                    "🧩 IPv6 not detected via 1.0.0.1. Verify your ISP or DNS provider isn't blocking Cloudflare's IPs."
+                    "🧩 IPv6 not detected via ifconfig.me. Verify your internet connection."
                 )
                 if purgeUnknownRecords:
                     deleteEntries("AAAA")
